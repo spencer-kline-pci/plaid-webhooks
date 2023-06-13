@@ -8,8 +8,6 @@ This is a starter app that is to be used with the Plaid and Webhooks [YouTube tu
 
 - [ ] Clone the repo.
 - [ ] Run `npm i`.
-- [ ] Create `.env` like the `.env.template` and copy `PLAID_CLIENT_ID` & `PLAID_SECRET`. `PLAID_ENV` should remain as sandbox.
+- [ ] Create `.env` like the `.env.template` and copy `PLAID_CLIENT_ID` & `PLAID_SECRET` from the Plaid Dashboard. `PLAID_ENV` should remain as sandbox.
 - [ ] For the `WEBHOOK_URL` we can set this to anything to begin we can change this later.
 - [ ] Run `npm run watch` it should start running on PORT 8000.
-
-### Following with the Demo
