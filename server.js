@@ -12,6 +12,13 @@ const {
   WebhookType,
 } = require("plaid");
 
+// Auth/verification imports
+const compare = require("secure-compare");
+const jwt_decode = require("jwt-decode");
+const JWT = require("jose");
+const sha256 = require("js-sha256");
+const crypto = require("crypto");
+
 const APP_PORT = process.env.APP_PORT || 8000;
 const USER_DATA_FILE = "user_data.json";
 
@@ -212,12 +219,10 @@ app.post("/server/fire_test_webhook", async (req, res, next) => {
   try {
     const fireTestWebhook = await plaidClient.sandboxItemFireWebhook({
       access_token: userRecord[FIELD_ACCESS_TOKEN],
-      webhook_type: WebhookType.Item,
-      webhook_code: SandboxItemFireWebhookRequestWebhookCodeEnum.AuthDataUpdate
-    });   
+      webhook_code: "DEFAULT_UPDATE",
+    });
 
     res.json(fireTestWebhook.data);
-
   } catch (error) {
     next(error);
   }
@@ -228,7 +233,7 @@ app.post("/server/fire_test_webhook", async (req, res, next) => {
  */
 app.post("/server/update_webhook", async (req, res, next) => {
   try {
-    webhookUrl= req.body.newUrl
+    webhookUrl = req.body.newUrl;
     const access_token = userRecord[FIELD_ACCESS_TOKEN];
 
     const updateWebhook = await plaidClient.itemWebhookUpdate({
@@ -237,43 +242,131 @@ app.post("/server/update_webhook", async (req, res, next) => {
     });
 
     res.json(updateWebhook.data);
-} catch (error) {
-    next(error);
-  }
-});
-
-/**
- * We've received a webhook! We should probably so something with it.
- */
-app.post("/server/receive_webhook", async (req, res, next) => {
-  try {
-    console.log('this is the webhook response');
-    console.dir(req.body, { depth: null, colors: true });
-
-    const product = req.body.webhook_type;
-    /** Webhook codes depend on the product */
-    const code = req.body.webhook_code;
-
-    switch (product) {
-      case WebhookType.Item:
-        handleItemWebhook(code, req.body);
-        break
-      case WebhookType.Transactions:
-        handleTransactionsWebhook(code, req.body);
-        break;
-      case WebhookType.Assets:
-        handleAssetsWebhook(code, req.body);
-        break;
-      default:
-        console.log(`Can't handle webhook product ${product}`);
-        break;
-    }
-
-    res.json({ status: "received" });
   } catch (error) {
     next(error);
   }
 });
+
+// Cache for webhook validation keys.
+const KEY_CACHE = new Map();
+
+/**
+ * Plaid Webhook Verification
+ */
+const verify = async (body, headers) => {
+  const signedJwt = headers["plaid-verification"];
+  const decodedToken = jwt_decode(signedJwt);
+  // Extract the JWT Header
+  const decodedTokenHeader = jwt_decode(signedJwt, { header: true });
+  // Extract the kid value from the header
+  const currentKeyID = decodedTokenHeader.kid;
+
+  // If key not in cache, update the key cache
+  if (!KEY_CACHE.has(currentKeyID)) {
+    const keyIDsToUpdate = [];
+    KEY_CACHE.forEach((keyID, key) => {
+      // We will also want to refresh any not-yet-expired keys
+      if (key.expired_at == null) {
+        keyIDsToUpdate.push(keyID);
+      }
+    });
+
+    keyIDsToUpdate.push(currentKeyID);
+
+    for (const keyID of keyIDsToUpdate) {
+      const response = await plaidClient
+        .webhookVerificationKeyGet({
+          key_id: keyID,
+        })
+        .catch((err) => {
+          console.log("ERROR");
+          console.error(err);
+          // decide how you want to handle unexpected API errors,
+          // e.g. retry later
+          return false;
+        });
+      const key = response.data.key;
+      KEY_CACHE.set(keyID, key);
+    }
+  }
+
+  // If the key ID is not in the cache, the key ID may be invalid.
+  if (!KEY_CACHE.has(currentKeyID)) {
+    return false;
+  }
+
+  // Fetch the current key from the cache.
+  const key = KEY_CACHE.get(currentKeyID);
+
+  // Reject expired keys.
+  if (key.expired_at != null) {
+    return false;
+  }
+
+  // Validate the signature and iat
+  try {
+    const keyLike = await JWT.importJWK(key);
+    // This will throw an error if verification fails
+    const { payload } = await JWT.jwtVerify(signedJwt, keyLike, {
+      maxTokenAge: "5 min",
+    });
+  } catch (error) {
+    return false;
+  }
+
+  // Compare hashes.
+  const claimedBodyHash = decodedToken.request_body_sha256;
+  console.log("STOP");
+  const reqBodyHash = sha256(JSON.stringify(body));
+  console.log(reqBodyHash);
+  console.log("ASTOP");
+  return compare(bodyHash, claimedBodyHash);
+};
+
+/**
+ * We've received a webhook! We should probably so something with it.
+ */
+app.post(
+  "/server/receive_webhook",
+  async (req, res, next) => {
+    console.log("MIDDLEWARE!");
+    const ip = req.headers["x-forwarded-for"];
+    console.log(`The client's IP Address is: ${ip}`);
+    const response = await verify(req.body, req.headers);
+    console.log("Verification");
+
+    next();
+  },
+  async (req, res, next) => {
+    try {
+      console.log("this is the webhook response");
+      //console.dir(req.body, { depth: null, colors: true });
+
+      const product = req.body.webhook_type;
+      /** Webhook codes depend on the product */
+      const code = req.body.webhook_code;
+
+      switch (product) {
+        case WebhookType.Item:
+          handleItemWebhook(code, req.body);
+          break;
+        case WebhookType.Transactions:
+          handleTransactionsWebhook(code, req.body);
+          break;
+        case WebhookType.Assets:
+          handleAssetsWebhook(code, req.body);
+          break;
+        default:
+          console.log(`Can't handle webhook product ${product}`);
+          break;
+      }
+
+      res.json({ status: "received" });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 function handleItemWebhook(code, requestBody) {
   switch (code) {
@@ -305,7 +398,6 @@ function handleItemWebhook(code, requestBody) {
       break;
   }
 }
-
 
 function handleTransactionsWebhook(code, requestBody) {
   switch (code) {
