@@ -16,7 +16,6 @@ const {
 const compare = require("secure-compare");
 const jwt_decode = require("jwt-decode");
 const JWT = require("jose");
-const sha256 = require("js-sha256");
 const crypto = require("crypto");
 
 const APP_PORT = process.env.APP_PORT || 8000;
@@ -30,7 +29,19 @@ let webhookUrl =
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(bodyParser.json());
+app.use(
+  bodyParser.json({
+    verify: function (req, res, buf, encoding) {
+      const hash = crypto.createHash("sha256");
+      hash.update(buf);
+      req.hasha = hash.digest("hex");
+      console.log("hash", req.hasha);
+
+      req.rawBody = buf.toString();
+      console.log("rawBody", req.rawBody);
+    },
+  })
+);
 app.use(express.static("public"));
 
 const server = app.listen(APP_PORT, function () {
@@ -316,10 +327,9 @@ const verify = async (body, headers) => {
 
   // Compare hashes.
   const claimedBodyHash = decodedToken.request_body_sha256;
-  console.log("STOP");
-  const reqBodyHash = sha256(JSON.stringify(body));
-  console.log(reqBodyHash);
-  console.log("ASTOP");
+  const hash = crypto.createHash("sha256");
+  hash.update(JSON.stringify(body, null, 2));
+  const bodyHash = hash.digest("hex");
   return compare(bodyHash, claimedBodyHash);
 };
 
@@ -329,13 +339,24 @@ const verify = async (body, headers) => {
 app.post(
   "/server/receive_webhook",
   async (req, res, next) => {
-    console.log("MIDDLEWARE!");
     const ip = req.headers["x-forwarded-for"];
     console.log(`The client's IP Address is: ${ip}`);
+    // NOTE: IPs are subject to change
+    const allowlist = [
+      "52.21.26.131",
+      "52.21.47.157",
+      "52.41.247.19",
+      "52.88.82.239",
+    ];
+    if (!allowlist.includes(ip)) {
+      res.status(401).send({ message: "Unauthorized" });
+    }
     const response = await verify(req.body, req.headers);
-    console.log("Verification");
-
-    next();
+    if (response) {
+      next();
+    } else {
+      res.status(401).send({ message: "Unauthorized" });
+    }
   },
   async (req, res, next) => {
     try {
